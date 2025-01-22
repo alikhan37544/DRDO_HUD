@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from ultralytics import YOLO
+from PIL import Image, ImageTk
 
 def select_input_file():
     input_file = filedialog.askopenfilename(
@@ -18,32 +20,19 @@ def select_output_file():
     )
     return output_file
 
-def detect_horizon_line(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=50)
-    if lines is not None:
-        # Find the most horizontal line
-        horizon_line = max(lines, key=lambda line: abs(line[0][2] - line[0][0]))
-        x1, y1, x2, y2 = horizon_line[0]
-        return x1, y1, x2, y2
-    else:
-        return None
+def draw_hud_and_detections(frame, detections):
+    # HUD elements can be added here (e.g., artificial horizon, altitude, etc.)
+    # For simplicity, this example focuses on object detection overlays.
 
-def calculate_roll_pitch(x1, y1, x2, y2, image_width, image_height):
-    # Calculate the angle of the horizon line
-    angle = np.arctan2(y2 - y1, x2 - x1)
-    roll = np.degrees(angle)
-    # Assuming the camera is level, pitch can be estimated by the vertical position of the horizon
-    horizon_y = (y1 + y2) / 2
-    pitch = ((image_height / 2) - horizon_y) / (image_height / 2) * 90  # Simplified estimation
-    return roll, pitch
-
-def overlay_horizon_and_angles(frame, x1, y1, x2, y2, roll, pitch):
-    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    cv2.putText(frame, f'Roll: {roll:.2f} degrees', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    cv2.putText(frame, f'Pitch: {pitch:.2f} degrees', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    # Draw detection boxes for detected aircraft
+    for detection in detections:
+        x1, y1, x2, y2 = map(int, detection['box'])
+        confidence = detection['confidence']
+        label = detection['label']
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, f'{label} {confidence:.2f}', (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    return frame
 
 def process_video(input_path, output_path):
     cap = cv2.VideoCapture(input_path)
@@ -57,20 +46,32 @@ def process_video(input_path, output_path):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+    # Load the YOLOv11 model
+    model = YOLO('yolov11.pt')  # Ensure 'yolov11.pt' is the correct path to your model weights
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        horizon_coords = detect_horizon_line(frame)
-        if horizon_coords:
-            x1, y1, x2, y2 = horizon_coords
-            roll, pitch = calculate_roll_pitch(x1, y1, x2, y2, width, height)
-            overlay_horizon_and_angles(frame, x1, y1, x2, y2, roll, pitch)
+        # Perform object detection
+        results = model(frame)
+        detections = []
+        for result in results:
+            for box, score, cls in zip(result.boxes.xyxy, result.boxes.conf, result.boxes.cls):
+                if cls == 'airplane' and score > 0.5:  # Adjust class name and confidence threshold as needed
+                    detections.append({
+                        'box': box,
+                        'confidence': score,
+                        'label': 'Aircraft'
+                    })
 
-        cv2.imshow('Horizon Detection', frame)
+        # Draw HUD and detection overlays
+        frame = draw_hud_and_detections(frame, detections)
         out.write(frame)
 
+        # Display the frame with HUD and detections in real-time
+        cv2.imshow('HUD with Aircraft Detection', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 

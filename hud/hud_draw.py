@@ -1,5 +1,23 @@
 import cv2
 import numpy as np
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+
+def select_input_file():
+    input_file = filedialog.askopenfilename(
+        title="Select Input Video",
+        filetypes=[("Video Files", "*.mp4 *.avi *.mov *.mkv"), ("All Files", "*.*")]
+    )
+    return input_file
+
+def select_output_file():
+    output_file = filedialog.asksaveasfilename(
+        title="Save Output Video As",
+        defaultextension=".mp4",
+        filetypes=[("MP4 Video", "*.mp4"), ("AVI Video", "*.avi"), ("All Files", "*.*")]
+    )
+    return output_file
 
 def draw_hud(frame, roll=0, pitch=0, altitude=10000, airspeed=300, heading=90):
     height, width, _ = frame.shape
@@ -42,7 +60,7 @@ def draw_hud(frame, roll=0, pitch=0, altitude=10000, airspeed=300, heading=90):
 def process_video(input_path, output_path):
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
-        print("Error: Could not open video.")
+        messagebox.showerror("Error", "Failed to open the input video.")
         return
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -66,15 +84,33 @@ def process_video(input_path, output_path):
         frame = draw_hud(frame, roll, pitch, altitude, airspeed, heading)
         out.write(frame)
 
-        cv2.imshow('HUD Simulation', frame)
+        # Display the frame with HUD overlay in real-time
+        cv2.imshow('HUD Overlay', frame)
+
+        # Press 'q' to exit the real-time display
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
     out.release()
     cv2.destroyAllWindows()
+    messagebox.showinfo("Success", "Processing complete. Output saved.")
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+
+    input_path = select_input_file()
+    if not input_path:
+        messagebox.showwarning("Input Required", "No input video selected.")
+        return
+
+    output_path = select_output_file()
+    if not output_path:
+        messagebox.showwarning("Output Required", "No output file specified.")
+        return
+
+    process_video(input_path, output_path)
 
 if __name__ == "__main__":
-    input_video_path = 'input_video.mp4'  # Replace with your input video path
-    output_video_path = 'output_video.mp4'  # Replace with your desired output path
-    process_video(input_video_path, output_video_path)
+    main()
