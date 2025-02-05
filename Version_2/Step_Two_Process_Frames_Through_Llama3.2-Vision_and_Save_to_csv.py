@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Script 2: HUD Data Extraction using Llama3.2-Vision via LangChain's Ollama Integration (Updated)
+Script 2: HUD OCR Extraction using Llama3.2-Vision via LangChain's Ollama Integration (Simplified)
 
-This script:
+This script performs the following:
   1. Lets the user select a folder containing frame images.
-  2. Uses the first frame to ask the vision model which HUD parameters are present.
-  3. Creates a CSV file with headers based on those parameters.
-  4. For every frame, sends a second prompt that attaches the image file (by specifying its path)
-     to extract only the corresponding values for each parameter.
-  5. Saves the extracted data into the CSV file.
+  2. For each image, sends a prompt to the vision model instructing it to act as a strict OCR.
+     The prompt extracts exactly three parameters: speed, heading, and altitude.
+  3. The model must output exactly three comma-separated numerical values with no extra text.
+  4. The script prints the raw model response (for debugging) and saves the results into a CSV file 
+     with columns: frame, image_file, speed, heading, altitude.
 
 Notes:
-  - This script uses `langchain_ollama` (install via `pip install -U langchain-ollama`).
-  - The parameter `num_threads=8` is used to speed up processing on systems with multiple threads.
-    Remove or adjust it if running on a different system.
+  - This script uses the updated LangChain Ollama integration from `langchain_ollama` (install via `pip install -U langchain-ollama`).
+  - The LLM is instantiated with num_threads=8 for faster processing on multi-thread systems (remove or adjust if running on a different system).
 """
 
 import os
@@ -22,30 +21,28 @@ import csv
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from langchain_ollama import OllamaLLM  # Updated import per langchain-community instructions
+from langchain_ollama import OllamaLLM  # Updated import from langchain_ollama
 
 # Configuration for the vision model
 OLLAMA_MODEL = "llama3.2-vision"
-OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # Ensure this matches your ollama serve config
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # Ensure this matches your Ollama server config
 
 # Instantiate the Ollama LLM with num_threads=8 for faster processing.
-# (Remove or adjust `num_threads` if running on a different system)
+# (Remove or adjust num_threads if running on a different system)
 ollama_llm = OllamaLLM(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, num_threads=8)
 
-# Define strong prompts
-FIRST_PROMPT = (
-    "Analyze the provided HUD image carefully. List all the key parameters "
-    "and indicators you can observe (e.g., speed, altitude, heading, etc.) "
-    "that are relevant for flight data analysis. Provide the list as comma-separated values."
+# Define a strict OCR prompt.
+# The prompt instructs the model to extract exactly three numerical values (speed, heading, altitude)
+# with no extra text. For example: "350,45,12000"
+STRICT_OCR_PROMPT = (
+    "You are a strict OCR for HUD displays. Your task is to extract exactly three numerical values "
+    "from the provided HUD image corresponding to speed, heading, and altitude. "
+    "Output only these three numbers separated by commas with no additional text, spaces, or punctuation. "
+    "For example: '350,45,12000'. If a value cannot be determined, leave its position empty (but maintain the commas).\n\n"
+    "Image file: {image_path}"
 )
 
-SECOND_PROMPT_TEMPLATE = (
-    "Given the following HUD parameters: {params}. "
-    "For the provided image, extract only the corresponding values for each parameter. "
-    "Return the values in the same comma-separated order with no additional text or commentary."
-)
-
-def select_folder(title="Select Folder Containing Frames"):
+def select_folder(title="Select Folder Containing Frame Images"):
     root = tk.Tk()
     root.withdraw()
     folder = filedialog.askdirectory(title=title)
@@ -59,32 +56,25 @@ def select_csv_save_path():
     )
     return file_path
 
-def call_vision_model(image_path, prompt):
+def call_vision_model(image_path, prompt_template):
     """
-    Uses LangChain's Ollama LLM to send a prompt with the image file attached.
-    Instead of embedding the image as base64, we now directly specify the image path
-    in the prompt (e.g., "Image file: /path/to/image.jpg"). Ollama's Llama3.2-vision
-    will then automatically load and process the image from that path.
+    Calls the vision model using the given prompt template.
+    The image_path is inserted into the prompt so that the model will load the image.
+    Prints the prompt and raw response for debugging.
     """
     try:
-        # Construct the prompt to attach the image by its file path.
-        prompt_with_attachment = f"{prompt}\n\nImage file: {image_path}"
-        # Use the updated invoke method (instead of __call__) per LangChain's recommendations.
-        response = ollama_llm.invoke(prompt_with_attachment)
-        return response.strip()
+        prompt_with_image = prompt_template.format(image_path=image_path)
+        print(f"Sending prompt for {image_path}:\n{prompt_with_image}\n")
+        response = ollama_llm.invoke(prompt_with_image)
+        raw_response = response.strip()
+        print(f"Raw model response for {image_path}:\n{raw_response}\n")
+        return raw_response
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
         return None
 
-def parse_parameters(param_str):
-    """
-    Parses the comma-separated list of parameters returned by the vision model.
-    """
-    params = [p.strip() for p in param_str.split(",") if p.strip()]
-    return params
-
 def process_frames(folder, csv_save_path):
-    # Gather image files with common image extensions.
+    # Gather image files (supports jpg, jpeg, png, bmp)
     image_extensions = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
     image_files = []
     for ext in image_extensions:
@@ -95,42 +85,24 @@ def process_frames(folder, csv_save_path):
         messagebox.showerror("Error", "No image files found in the selected folder.")
         return
 
-    # Step 1: Use the first image to extract the HUD parameters.
-    first_image = image_files[0]
-    print(f"Using first image for parameter extraction: {first_image}")
-    param_response = call_vision_model(first_image, FIRST_PROMPT)
-    if not param_response:
-        print("Could not extract parameters from the first image.")
-        return
-
-    print("Vision model parameter response:", param_response)
-    parameters = parse_parameters(param_response)
-    if not parameters:
-        print("No valid parameters parsed from the vision model response.")
-        return
-
-    # Create CSV file headers: frame identifier, image file, plus the extracted parameters.
-    headers = ["frame", "image_file"] + parameters
+    headers = ["frame", "image_file", "speed", "heading", "altitude"]
     with open(csv_save_path, "w", newline="") as csvfile:
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(headers)
 
-        # Step 2: Process each frame image to extract the corresponding values.
         for image_path in image_files:
-            second_prompt = SECOND_PROMPT_TEMPLATE.format(params=", ".join(parameters))
-            result = call_vision_model(image_path, second_prompt)
-            if result is None:
-                row = [os.path.basename(image_path), image_path] + ["ERROR"] * len(parameters)
+            response = call_vision_model(image_path, STRICT_OCR_PROMPT)
+            if response is None:
+                values = ["ERROR", "ERROR", "ERROR"]
             else:
-                # Expect a comma-separated string of values.
-                values = [v.strip() for v in result.split(",")]
-                if len(values) != len(parameters):
-                    print(f"Warning: Parameter count mismatch for {image_path}. Expected {len(parameters)} values.")
-                    values = ["MISMATCH"] * len(parameters)
-                row = [os.path.basename(image_path), image_path] + values
-
+                # Expect exactly three values separated by commas.
+                values = [v.strip() for v in response.split(",")]
+                if len(values) != 3:
+                    print(f"Warning: Parameter count mismatch for {image_path}. Expected 3 values.")
+                    values = ["MISMATCH", "MISMATCH", "MISMATCH"]
+            row = [os.path.basename(image_path), image_path] + values
             csvwriter.writerow(row)
-            print(f"Processed {image_path}")
+            print(f"Processed {image_path} => {values}\n")
 
     print(f"CSV file successfully created at: {csv_save_path}")
 
