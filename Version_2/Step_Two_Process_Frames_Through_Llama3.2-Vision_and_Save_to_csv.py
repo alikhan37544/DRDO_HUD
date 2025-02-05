@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Test commit
 """
 Script 2: HUD OCR Extraction using Llama3.2-Vision via LangChain's Ollama Integration (Simplified)
 
