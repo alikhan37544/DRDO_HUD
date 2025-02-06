@@ -1,40 +1,56 @@
 #!/usr/bin/env python3
-# Test commit
 """
-Script 2: HUD OCR Extraction using Llama3.2-Vision via LangChain's Ollama Integration (Simplified)
+Improved Script 2: HUD OCR Extraction using Llama3.2-Vision via LangChain's Ollama Integration
 
-This script performs the following:
-  1. Lets the user select a folder containing frame images.
-  2. For each image, sends a prompt to the vision model instructing it to act as a strict OCR.
-     The prompt extracts exactly three parameters: speed, heading, and altitude.
-  3. The model must output exactly three comma-separated numerical values with no extra text.
-  4. The script prints the raw model response (for debugging) and saves the results into a CSV file 
-     with columns: frame, image_file, speed, heading, altitude.
+Features:
+  - Modular code structure with a main() function.
+  - Logging for debugging instead of print statements.
+  - Retry mechanism if OCR output doesn't match expected format.
+  - Optional command-line arguments for input folder and output CSV path.
+  - Progress bar via tqdm (if installed) for processing multiple images.
+  - Uses Tkinter file dialogs as a fallback if arguments are not provided.
 
-Notes:
-  - This script uses the updated LangChain Ollama integration from `langchain_ollama` (install via `pip install -U langchain-ollama`).
-  - The LLM is instantiated with num_threads=8 for faster processing on multi-thread systems (remove or adjust if running on a different system).
+The script processes a folder of images (supported formats: jpg, jpeg, png, bmp),
+sends each image to the vision model with a strict OCR prompt to extract three values:
+speed, heading, and altitude.
+The OCR result must be exactly three comma-separated values (e.g. "350,45,12000").
+If not, the script retries a few times before writing a "MISMATCH" row.
+Results are saved to a CSV file.
 """
 
 import os
 import glob
 import csv
+import argparse
+import logging
+import time
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from langchain_ollama import OllamaLLM  # Updated import from langchain_ollama
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # Configuration for the vision model
 OLLAMA_MODEL = "llama3.2-vision"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # Ensure this matches your Ollama server config
 
-# Instantiate the Ollama LLM with num_threads=8 for faster processing.
-# (Remove or adjust num_threads if running on a different system)
+# Number of retries if the OCR result does not yield exactly 3 values
+MAX_RETRIES = 2
+
+# Instantiate the Ollama LLM with num_threads=8 (adjust/remove as needed)
 ollama_llm = OllamaLLM(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, num_threads=8)
 
-# Define a strict OCR prompt.
-# The prompt instructs the model to extract exactly three numerical values (speed, heading, altitude)
-# with no extra text. For example: "350,45,12000"
+# Define the strict OCR prompt.
+# The model is instructed to output exactly three numbers (speed, heading, altitude)
+# separated by commas, with no extra text.
 STRICT_OCR_PROMPT = (
     "You are a strict OCR for HUD displays. Your task is to extract exactly three numerical values "
     "from the provided HUD image corresponding to speed, heading, and altitude. "
@@ -43,13 +59,13 @@ STRICT_OCR_PROMPT = (
     "Image file: {image_path}"
 )
 
-def select_folder(title="Select Folder Containing Frame Images"):
+def select_folder_dialog(title="Select Folder Containing Frame Images"):
     root = tk.Tk()
     root.withdraw()
     folder = filedialog.askdirectory(title=title)
     return folder
 
-def select_csv_save_path():
+def select_csv_save_path_dialog():
     root = tk.Tk()
     root.withdraw()
     file_path = filedialog.asksaveasfilename(
@@ -59,63 +75,89 @@ def select_csv_save_path():
 
 def call_vision_model(image_path, prompt_template):
     """
-    Calls the vision model using the given prompt template.
-    The image_path is inserted into the prompt so that the model will load the image.
-    Prints the prompt and raw response for debugging.
+    Calls the vision model using the given prompt.
+    Returns the raw response as a string.
     """
     try:
         prompt_with_image = prompt_template.format(image_path=image_path)
-        print(f"Sending prompt for {image_path}:\n{prompt_with_image}\n")
+        logging.info("Sending prompt for %s:\n%s", image_path, prompt_with_image)
         response = ollama_llm.invoke(prompt_with_image)
         raw_response = response.strip()
-        print(f"Raw model response for {image_path}:\n{raw_response}\n")
+        logging.info("Raw model response for %s:\n%s", image_path, raw_response)
         return raw_response
     except Exception as e:
-        print(f"Error processing {image_path}: {e}")
+        logging.error("Error processing %s: %s", image_path, e)
         return None
 
-def process_frames(folder, csv_save_path):
+def process_image(image_path):
+    """
+    Process a single image using the OCR prompt.
+    Retries up to MAX_RETRIES times if the OCR output does not return exactly three comma-separated values.
+    Returns a list of three values or ["MISMATCH", "MISMATCH", "MISMATCH"] on failure.
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        response = call_vision_model(image_path, STRICT_OCR_PROMPT)
+        if response is None:
+            continue
+        values = [v.strip() for v in response.split(",")]
+        if len(values) == 3:
+            return values
+        else:
+            logging.warning("Attempt %d: Parameter count mismatch for %s. Expected 3 values, got %d. Response: %s",
+                            attempt + 1, image_path, len(values), response)
+            time.sleep(1)  # Delay before retrying
+    return ["MISMATCH", "MISMATCH", "MISMATCH"]
+
+def process_frames(input_folder, csv_save_path):
     # Gather image files (supports jpg, jpeg, png, bmp)
     image_extensions = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
     image_files = []
     for ext in image_extensions:
-        image_files.extend(glob.glob(os.path.join(folder, ext)))
-    image_files.sort()  # sort alphabetically
-
+        image_files.extend(glob.glob(os.path.join(input_folder, ext)))
+    image_files.sort()
+    
     if not image_files:
-        messagebox.showerror("Error", "No image files found in the selected folder.")
+        logging.error("No image files found in the selected folder: %s", input_folder)
         return
 
     headers = ["frame", "image_file", "speed", "heading", "altitude"]
     with open(csv_save_path, "w", newline="") as csvfile:
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(headers)
-
-        for image_path in image_files:
-            response = call_vision_model(image_path, STRICT_OCR_PROMPT)
-            if response is None:
-                values = ["ERROR", "ERROR", "ERROR"]
-            else:
-                # Expect exactly three values separated by commas.
-                values = [v.strip() for v in response.split(",")]
-                if len(values) != 3:
-                    print(f"Warning: Parameter count mismatch for {image_path}. Expected 3 values.")
-                    values = ["MISMATCH", "MISMATCH", "MISMATCH"]
+        
+        # Use a progress bar if tqdm is available
+        iterator = tqdm(image_files, desc="Processing images") if tqdm else image_files
+        for image_path in iterator:
+            values = process_image(image_path)
             row = [os.path.basename(image_path), image_path] + values
             csvwriter.writerow(row)
-            print(f"Processed {image_path} => {values}\n")
+            logging.info("Processed %s => %s", image_path, values)
+    
+    logging.info("CSV file successfully created at: %s", csv_save_path)
 
-    print(f"CSV file successfully created at: {csv_save_path}")
+def main():
+    parser = argparse.ArgumentParser(description="HUD OCR Extraction using Llama3.2-Vision")
+    parser.add_argument("--input_folder", help="Path to folder containing frame images")
+    parser.add_argument("--output_csv", help="Path to output CSV file")
+    args = parser.parse_args()
+    
+    if args.input_folder:
+        input_folder = args.input_folder
+    else:
+        input_folder = select_folder_dialog("Select Folder Containing Frame Images")
+        if not input_folder:
+            messagebox.showerror("Error", "No folder selected.")
+            return
+    
+    if args.output_csv:
+        csv_save_path = args.output_csv
+    else:
+        csv_save_path = select_csv_save_path_dialog()
+        if not csv_save_path:
+            messagebox.showerror("Error", "No CSV file path selected.")
+            return
+
+    process_frames(input_folder, csv_save_path)
 
 if __name__ == "__main__":
-    frames_folder = select_folder("Select Folder Containing Frame Images")
-    if not frames_folder:
-        messagebox.showerror("Error", "No folder selected.")
-        exit(1)
-
-    csv_path = select_csv_save_path()
-    if not csv_path:
-        messagebox.showerror("Error", "No CSV file path selected.")
-        exit(1)
-
-    process_frames(frames_folder, csv_path)
+    main()
