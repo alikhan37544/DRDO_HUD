@@ -191,7 +191,7 @@ def draw_target_info(screen, data):
         screen.blit(text, (WIDTH//2+130, HEIGHT//2-90))
     
     # Waypoint
-    text = font_medium.render(f"WPT: {data.waypoint_distance:.1f}KM / {data.waypoint_bearing:03d}°", True, GREEN)
+    text = font_medium.render(f"WPT: {data.waypoint_distance:.1f}KM / {int(data.waypoint_bearing):03d}°", True, GREEN)
     screen.blit(text, (WIDTH//2+50, 100))
 
 def update_hud_values(data):
