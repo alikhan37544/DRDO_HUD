@@ -1,139 +1,157 @@
 #!/usr/bin/env python3
 """
-Script 2: HUD Data Extraction using Llama3.2-Vision via Ollama
-- Allows the user to select a folder containing frame images.
-- Uses the first frame to ask the vision model what parameters (HUD details) are present.
-- Generates a CSV file with headers based on the parameters.
-- Processes each image with a strong prompt that extracts only the values (like an OCR).
-- Saves the results into the CSV file.
+Flight Event Classifier from HUD CSV Data
+
+This script:
+  - Prompts the user to select the CSV file generated in Step 2.
+  - Reads the CSV (which contains columns such as "frame", "image_file", and various HUD parameters).
+  - Compares consecutive rows to detect significant changes based on preset thresholds.
+  - Applies simple rules to classify events (e.g. if speed increases significantly while altitude decreases, label as "Pull Up").
+  - Writes a new CSV file (or overwrites if desired) with an additional "event" column that summarizes the detected events.
+
+Note:
+  - Thresholds for speed, altitude, and heading are defined in the script – adjust these as necessary.
+  - The script uses pandas for CSV processing and tkinter for file selection dialogs.
 """
 
-import os
-import glob
-import csv
+import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
-import requests
-from PIL import Image
 
-# Configuration
-OLLAMA_HOST = "http://127.0.0.1:11434"  # Ollama API host
+# Define threshold values (adjust these based on your data and units)
+THRESHOLDS = {
+    "speed": 50,       # e.g., a change in speed (units as per your CSV data)
+    "altitude": 1000,  # e.g., a change in altitude (units as per your CSV data)
+    "heading": 10      # e.g., a change in heading (degrees)
+}
 
-# Define strong prompts
-FIRST_PROMPT = (
-    "Analyze the provided HUD image carefully. List all the key parameters "
-    "and indicators you can observe (such as speed, altitude, heading, etc.) "
-    "that are relevant for flight data analysis. Provide the list as comma-separated values."
-)
-
-SECOND_PROMPT_TEMPLATE = (
-    "Given the following HUD parameters: {params}. "
-    "For the provided image, extract only the corresponding values for each parameter. "
-    "Return the values in the same comma-separated order with no additional text or commentary."
-)
-
-def select_folder(title="Select Folder Containing Frames"):
+def select_csv_file():
     root = tk.Tk()
     root.withdraw()
-    folder = filedialog.askdirectory(title=title)
-    return folder
-
-def select_csv_save_path():
-    root = tk.Tk()
-    root.withdraw()
-    file_path = filedialog.asksaveasfilename(
-        title="Save CSV File", defaultextension=".csv", filetypes=[("CSV Files", "*.csv")]
+    file_path = filedialog.askopenfilename(
+        title="Select CSV File with HUD Data", filetypes=[("CSV Files", "*.csv")]
     )
     return file_path
 
-def call_vision_model(image_path, prompt):
-    """
-    Sends the image along with the prompt to the vision model API.
-    Assumes that the API accepts multipart/form-data with 'file' and 'prompt' fields.
-    """
-    with open(image_path, "rb") as img_file:
-        files = {"file": img_file}
-        data = {"prompt": prompt}
-        try:
-            response = requests.post(OLLAMA_HOST, data=data, files=files)
-            response.raise_for_status()
-            # Assuming the API returns a JSON with a 'result' field
-            result = response.json().get("result", "")
-            return result.strip()
-        except Exception as e:
-            print(f"Error processing {image_path}: {e}")
-            return None
+def select_output_file():
+    root = tk.Tk()
+    root.withdraw()
+    file_path = filedialog.asksaveasfilename(
+        title="Save Classified Events CSV", defaultextension=".csv", filetypes=[("CSV Files", "*.csv")]
+    )
+    return file_path
 
-def parse_parameters(param_str):
+def classify_events(df):
     """
-    Parse the comma separated list of parameters.
-    The vision model is expected to return something like: "Speed, Altitude, Heading, ..."
+    For each row (after the first), compare with the previous row and
+    classify events based on significant changes.
+    
+    Returns the DataFrame with an additional "event" column.
     """
-    params = [p.strip() for p in param_str.split(",") if p.strip()]
-    return params
+    # Assume the first two columns are "frame" and "image_file".
+    # The remaining columns are the extracted HUD parameters.
+    param_cols = df.columns[2:]
+    
+    # Convert parameter columns to numeric (coerce errors to NaN)
+    for col in param_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    
+    # Try to detect which column corresponds to which parameter using a case-insensitive search.
+    col_map = {}
+    for col in param_cols:
+        clower = col.lower()
+        if "speed" in clower:
+            col_map["speed"] = col
+        elif "altitude" in clower:
+            col_map["altitude"] = col
+        elif "heading" in clower:
+            col_map["heading"] = col
 
-def process_frames(folder, csv_save_path):
-    # Get list of image files (common image extensions)
-    image_extensions = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
-    image_files = []
-    for ext in image_extensions:
-        image_files.extend(glob.glob(os.path.join(folder, ext)))
-    image_files.sort()  # sort by name
+    # Prepare a list to store event descriptions for each row.
+    events = ["N/A"]  # First row has no previous data to compare.
 
-    if not image_files:
-        messagebox.showerror("Error", "No image files found in the folder.")
+    # Iterate over rows (starting from row 1) and compare with previous row.
+    for i in range(1, len(df)):
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        event_desc = []
+        
+        # Check speed change if available.
+        if "speed" in col_map:
+            prev_speed = prev[col_map["speed"]]
+            curr_speed = curr[col_map["speed"]]
+            if pd.notna(prev_speed) and pd.notna(curr_speed):
+                diff_speed = curr_speed - prev_speed
+                if abs(diff_speed) >= THRESHOLDS["speed"]:
+                    if diff_speed > 0:
+                        event_desc.append(f"Speed Increase ({prev_speed}->{curr_speed})")
+                    else:
+                        event_desc.append(f"Speed Decrease ({prev_speed}->{curr_speed})")
+        
+        # Check altitude change if available.
+        if "altitude" in col_map:
+            prev_alt = prev[col_map["altitude"]]
+            curr_alt = curr[col_map["altitude"]]
+            if pd.notna(prev_alt) and pd.notna(curr_alt):
+                diff_alt = curr_alt - prev_alt
+                if abs(diff_alt) >= THRESHOLDS["altitude"]:
+                    if diff_alt > 0:
+                        event_desc.append(f"Altitude Increase ({prev_alt}->{curr_alt})")
+                    else:
+                        event_desc.append(f"Altitude Decrease ({prev_alt}->{curr_alt})")
+        
+        # Check heading change if available.
+        if "heading" in col_map:
+            prev_head = prev[col_map["heading"]]
+            curr_head = curr[col_map["heading"]]
+            if pd.notna(prev_head) and pd.notna(curr_head):
+                diff_head = curr_head - prev_head
+                if abs(diff_head) >= THRESHOLDS["heading"]:
+                    if diff_head > 0:
+                        event_desc.append(f"Heading Increase ({prev_head}->{curr_head})")
+                    else:
+                        event_desc.append(f"Heading Decrease ({prev_head}->{curr_head})")
+        
+        # Combined rule: If speed increases significantly and altitude decreases significantly,
+        # classify it as a "Pull Up" maneuver.
+        if "speed" in col_map and "altitude" in col_map:
+            if pd.notna(prev[col_map["speed"]]) and pd.notna(curr[col_map["speed"]]) \
+               and pd.notna(prev[col_map["altitude"]]) and pd.notna(curr[col_map["altitude"]]):
+                if (curr[col_map["speed"]] - prev[col_map["speed"]]) > THRESHOLDS["speed"] \
+                   and (curr[col_map["altitude"]] - prev[col_map["altitude"]]) < -THRESHOLDS["altitude"]:
+                    event_desc.append("Pull Up")
+        
+        # If no significant change is detected, mark as "No Significant Change"
+        if not event_desc:
+            event_desc = ["No Significant Change"]
+        
+        events.append("; ".join(event_desc))
+    
+    df["event"] = events
+    return df
+
+def main():
+    csv_path = select_csv_file()
+    if not csv_path:
+        messagebox.showerror("Error", "No CSV file selected.")
         return
-
-    # Step 1: Use the first image to determine the HUD parameters
-    first_image = image_files[0]
-    print(f"Using first image for parameter extraction: {first_image}")
-    param_response = call_vision_model(first_image, FIRST_PROMPT)
-    if not param_response:
-        print("Could not extract parameters from the first image.")
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        messagebox.showerror("Error", f"Error reading CSV: {e}")
         return
-
-    print("Vision model parameters response:", param_response)
-    parameters = parse_parameters(param_response)
-    if not parameters:
-        print("No valid parameters parsed from the vision model response.")
+    
+    classified_df = classify_events(df)
+    
+    output_path = select_output_file()
+    if not output_path:
+        messagebox.showerror("Error", "No output file selected.")
         return
-
-    # Create CSV file with headers: a frame identifier and the parameters.
-    headers = ["frame", "image_file"] + parameters
-    with open(csv_save_path, "w", newline="") as csvfile:
-        csvwriter = csv.writer(csvfile)
-        csvwriter.writerow(headers)
-
-        # Step 2: Process each frame image
-        for image_path in image_files:
-            # Build the second prompt with the parameters list
-            second_prompt = SECOND_PROMPT_TEMPLATE.format(params=", ".join(parameters))
-            result = call_vision_model(image_path, second_prompt)
-            if result is None:
-                row = [os.path.basename(image_path), image_path] + ["ERROR"] * len(parameters)
-            else:
-                # Expecting a comma-separated string of values
-                values = [v.strip() for v in result.split(",")]
-                # If the number of returned values does not match parameters, mark error
-                if len(values) != len(parameters):
-                    print(f"Warning: Parameter count mismatch for {image_path}. Expected {len(parameters)} values.")
-                    values = ["MISMATCH"] * len(parameters)
-                row = [os.path.basename(image_path), image_path] + values
-
-            csvwriter.writerow(row)
-            print(f"Processed {image_path}")
-
-    print(f"CSV file created at {csv_save_path}")
+    try:
+        classified_df.to_csv(output_path, index=False)
+        print(f"Flight events classification saved to {output_path}")
+    except Exception as e:
+        messagebox.showerror("Error", f"Error writing CSV: {e}")
 
 if __name__ == "__main__":
-    frames_folder = select_folder("Select Folder Containing Frame Images")
-    if not frames_folder:
-        messagebox.showerror("Error", "No folder selected.")
-        exit(1)
-
-    csv_path = select_csv_save_path()
-    if not csv_path:
-        messagebox.showerror("Error", "No CSV file path selected.")
-        exit(1)
-
-    process_frames(frames_folder, csv_path)
+    main()
