@@ -416,7 +416,8 @@ class HUDAnalyzer:
         if abs(pitch) > 15 and alt_trend == "decreasing":
             flight_conditions.append(f"{Fore.YELLOW}Descending maneuver ({pitch:.1f}° pitch down){Style.RESET_ALL}")
         
-        if abs(roll_trend) == "increasing" and abs(roll) > 20:
+        # Fixed line - removed abs() from roll_trend which is a string
+        if roll_trend == "increasing" and abs(roll) > 20:
             flight_conditions.append(f"{Fore.YELLOW}Roll initiation{Style.RESET_ALL}")
         
         if aoa > 12:
