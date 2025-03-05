@@ -5,6 +5,7 @@ import math
 import time
 import os
 import csv
+import random  # Add this missing import
 from datetime import datetime
 from collections import deque
 from colorama import Fore, Back, Style, init
@@ -15,6 +16,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
 from tkinter import ttk
 import warnings
+import mediapipe as mp  # Add MediaPipe import
+
+# Suppress MediaPipe warnings about feedback tensors
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Suppress matplotlib warnings
 warnings.filterwarnings("ignore")
@@ -68,12 +75,33 @@ class HUDData:
         self.hand_confidence = 0.0
         self.hand_box = (0, 0, 0, 0)  # x1, y1, x2, y2
         self.hand_tracking_id = None
+        self.dual_control = False
+        self.prev_pitch = 0  # For G-force calculation
         
         # Flight dynamics - history for analytics
         self.altitude_history = deque(maxlen=100)
         self.airspeed_history = deque(maxlen=100)
         self.pitch_history = deque(maxlen=100)
         self.roll_history = deque(maxlen=100)
+        
+        # Event tracking
+        self.last_event = None
+        self.event_time = 0
+        self.event_history = deque(maxlen=10)
+        self.missile_warning = False
+        self.terrain_warning = False
+        self.system_faults = []
+
+        # MediaPipe tracking data
+        self.body_landmarks = None
+        self.hand_landmarks = []
+        self.left_hand_landmarks = None
+        self.right_hand_landmarks = None
+        self.body_detected = False
+        self.hand_gestures = {
+            "left": "None",
+            "right": "None"
+        }
 
 # Create semi-transparent surface
 def create_transparent_surface(width, height, alpha=150):
@@ -127,38 +155,147 @@ class HandAnalyzer:
         self.hand_confidences = deque(maxlen=100)
         
     def init_csv(self):
-        """Initialize CSV file with headers"""
-        headers = [
-            'timestamp', 'hand_detected', 'num_hands', 'hand_position_x', 
-            'hand_position_y', 'hand_gesture', 'hand_confidence', 'altitude', 
-            'airspeed', 'heading', 'pitch', 'roll', 'g_force', 'target_locked'
-        ]
-        
-        with open(self.csv_filename, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(headers)
-    
-    def log_to_csv(self):
-        """Log current data to CSV"""
-        with open(self.csv_filename, 'a', newline='') as file:
-            writer = csv.writer(file)
-            x, y = self.current_data.hand_position
-            writer.writerow([
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
-                self.current_data.hand_detected,
-                self.current_data.num_hands,
-                x, y,
-                self.current_data.hand_gesture,
-                self.current_data.hand_confidence,
-                self.current_data.altitude,
-                self.current_data.airspeed,
-                self.current_data.heading,
-                self.current_data.pitch,
-                self.current_data.roll,
-                self.current_data.g_force,
-                self.current_data.target_locked
-            ])
+        """Initialize CSV file with comprehensive headers"""
+        try:
+            # Create a directory for logs if it doesn't exist
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hud_logs')
+            os.makedirs(log_dir, exist_ok=True)
             
+            # Create CSV file path with timestamp and location
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            self.csv_filename = os.path.join(log_dir, f"hud_data_{timestamp}.csv")
+            
+            # Extremely comprehensive headers for detailed data capture
+            headers = [
+                'timestamp', 
+                # Hand detection data
+                'hand_detected', 'num_hands', 'hand_position_x', 'hand_position_y',
+                'hand_gesture', 'hand_confidence', 'hand_box_x1', 'hand_box_y1', 
+                'hand_box_x2', 'hand_box_y2', 'dual_control', 'hand_tracking_id',
+                'left_hand_gesture', 'right_hand_gesture',
+                # Body tracking data
+                'body_detected', 'head_position_x', 'head_position_y',
+                # Flight parameters
+                'altitude', 'airspeed', 'heading', 'pitch', 'roll', 'g_force', 
+                'aoa', 'mach', 'fuel', 
+                # Target information
+                'target_locked', 'target_distance', 'weapon_status',
+                # Navigation
+                'waypoint_bearing', 'waypoint_distance',
+                # Warnings and events
+                'last_event', 'event_time', 'terrain_warning', 'missile_warning',
+                # System data
+                'detection_mode', 'fps',
+                # Environment
+                'session_runtime'
+            ]
+            
+            with open(self.csv_filename, 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(headers)
+            
+            print(f"\n[DATA] Enhanced CSV log created at: {os.path.abspath(self.csv_filename)}\n")
+            
+            # Initialize logging timer
+            self.last_log_time = time.time()
+            self.log_interval = 0.5  # Log every 0.5 seconds
+            self.session_start_time = time.time()
+            
+            # Test write to ensure permissions are good
+            self.log_test_record()
+            
+        except Exception as e:
+            print(f"Error initializing CSV file: {e}")
+            # Fall back to desktop or temp directory if home dir fails
+            try:
+                desktop_dir = os.path.join(os.path.expanduser('~'), 'Desktop')
+                self.csv_filename = os.path.join(desktop_dir, f"hud_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                with open(self.csv_filename, 'w', newline='') as file:
+                    writer = csv.writer(file)
+                    writer.writerow(headers)
+                print(f"Fallback CSV log created at: {self.csv_filename}")
+            except:
+                print("Could not create CSV file in any location. CSV logging disabled.")
+                self.csv_filename = None
+
+    def log_test_record(self):
+        """Write a test record to verify CSV is working"""
+        try:
+            with open(self.csv_filename, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'TEST', 'TEST', 0, 0, 'TEST', 0.0, 0, 0, 0, 0, 0, 0, 'False',
+                    'TEST', 0, 0.0, 0.0, 'False', 'False', 'TEST'
+                ])
+                file.flush()
+            print("Test record written successfully to CSV")
+        except Exception as e:
+            print(f"Error writing test record: {e}")
+
+    def log_to_csv(self):
+        """Log current data to CSV with aggressive flushing for maximum data capture"""
+        if not hasattr(self, 'csv_filename') or not self.csv_filename:
+            return
+            
+        try:
+            with open(self.csv_filename, 'a', newline='') as file:
+                writer = csv.writer(file)
+                
+                # Get data, using defensive programming with defaults
+                x, y = getattr(self.current_data, 'hand_position', (0, 0))
+                
+                # Get detection mode from global if available
+                detection_mode = "Unknown"
+                if hasattr(self.current_data, 'detection_mode'):
+                    detection_mode = "MediaPipe" if self.current_data.detection_mode == 0 else "YOLO"
+                
+                # Comprehensive data row with all available metrics
+                row = [
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    getattr(self.current_data, 'hand_detected', False),
+                    getattr(self.current_data, 'num_hands', 0),
+                    x, y,
+                    getattr(self.current_data, 'hand_gesture', "None"),
+                    getattr(self.current_data, 'hand_confidence', 0.0),
+                    getattr(self.current_data, 'altitude', 0),
+                    getattr(self.current_data, 'airspeed', 0),
+                    getattr(self.current_data, 'heading', 0),
+                    getattr(self.current_data, 'pitch', 0),
+                    getattr(self.current_data, 'roll', 0),
+                    getattr(self.current_data, 'g_force', 1.0),
+                    getattr(self.current_data, 'target_locked', False),
+                    getattr(self.current_data, 'weapon_status', "UNKNOWN"),
+                    getattr(self.current_data, 'fuel', 0),
+                    getattr(self.current_data, 'mach', 0.0),
+                    getattr(self.current_data, 'aoa', 0.0),
+                    getattr(self.current_data, 'terrain_warning', False),
+                    getattr(self.current_data, 'missile_warning', False),
+                    detection_mode
+                ]
+                
+                writer.writerow(row)
+                
+                # Force immediate flush to disk to prevent data loss
+                file.flush()
+                os.fsync(file.fileno())
+                
+        except Exception as e:
+            print(f"Error writing to CSV: {e}")
+            # Try to recreate the file if it's been deleted or corrupted
+            if not os.path.exists(self.csv_filename):
+                print("CSV file missing, attempting to recreate...")
+                self.init_csv()
+    
+    def flush_csv(self):
+        """Force flush CSV file to disk"""
+        try:
+            with open(self.csv_filename, 'a', newline='') as file:
+                file.flush()
+                os.fsync(file.fileno())
+        except Exception as e:
+            print(f"Error flushing CSV: {e}")
+    
     def on_closing(self):
         """Handle window closing"""
         print("Analytics window closed, data saved to CSV")
@@ -252,7 +389,7 @@ class HandAnalyzer:
         self.flight_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
     
     def setup_status_tab(self):
-        """Setup the system status tab"""
+        """Setup the system status tab with event log"""
         # Create frame for status information
         self.status_frame = ttk.Frame(self.tab_status)
         self.status_frame.pack(fill=tk.BOTH, expand=1, padx=20, pady=20)
@@ -295,14 +432,67 @@ class HandAnalyzer:
         self.target_label = ttk.Label(self.nav_frame, text="Target: Not Locked", font=('Arial', 12))
         self.target_label.pack(pady=5)
         
+        # Event log
+        self.event_frame = ttk.LabelFrame(self.status_frame, text="Event Log")
+        self.event_frame.pack(fill=tk.X, pady=10)
+        
+        self.event_list = tk.Listbox(self.event_frame, height=6, font=('Courier', 10))
+        self.event_list.pack(fill=tk.X, pady=5)
+        
+        # Warning indicators
+        self.warning_frame = ttk.LabelFrame(self.status_frame, text="Warnings")
+        self.warning_frame.pack(fill=tk.X, pady=10)
+        
+        self.missile_warning_label = ttk.Label(self.warning_frame, text="MISSILE WARNING: NONE", 
+                                              font=('Arial', 12), foreground='gray')
+        self.missile_warning_label.pack(pady=5)
+        
+        self.terrain_warning_label = ttk.Label(self.warning_frame, text="TERRAIN WARNING: NONE", 
+                                              font=('Arial', 12), foreground='gray')
+        self.terrain_warning_label.pack(pady=5)
+        
     def update(self, hud_data):
         """Update with new HUD data"""
+        # Store detection mode in the data object for CSV logging
+        if not hasattr(hud_data, 'detection_mode'):
+            hud_data.detection_mode = 0  # Default to MediaPipe
+            
+        # Track events for event log
+        if hasattr(hud_data, 'last_event') and hud_data.last_event:
+            if not self.prev_data or hud_data.last_event != self.prev_data.last_event:
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                self.event_list.insert(0, f"{timestamp} - {hud_data.last_event}")
+                # Keep only last 20 events
+                if self.event_list.size() > 20:
+                    self.event_list.delete(20)
+        
+        # Update warning indicators
+        if hasattr(hud_data, 'missile_warning') and hud_data.missile_warning:
+            self.missile_warning_label.config(text="MISSILE WARNING: ACTIVE", foreground='red')
+        else:
+            self.missile_warning_label.config(text="MISSILE WARNING: NONE", foreground='gray')
+            
+        if hasattr(hud_data, 'terrain_warning') and hud_data.terrain_warning:
+            self.terrain_warning_label.config(text="TERRAIN WARNING: PULL UP", foreground='red')
+        else:
+            self.terrain_warning_label.config(text="TERRAIN WARNING: NONE", foreground='gray')
+        
+        # Rest of the update method...
         self.prev_data = self.current_data
         self.current_data = hud_data
         self.data_history.append(hud_data)
         
-        # Log data to CSV
+        # Log data to CSV on EVERY update for maximum data capture
         self.log_to_csv()
+        
+        # No conditional flushing, always flush
+        if not hasattr(self, 'update_count'):
+            self.update_count = 0
+        self.update_count += 1
+        
+        # Still print status updates periodically
+        if self.update_count % 100 == 0:
+            print(f"Logged {self.update_count} records to CSV")
         
         # Update time series data
         self.timestamps.append(datetime.now())
@@ -682,45 +872,82 @@ def update_hud_values(data):
     return data
 
 def analyze_hand_movement(data):
-    """Analyze hand movement and update HUD parameters based on gesture/position"""
+    """Analyze hand movement and update HUD parameters based on hand tilt"""
     if data.hand_detected:
         x, y = data.hand_position
+        x1, y1, x2, y2 = data.hand_box
         center_x, center_y = WIDTH // 2, HEIGHT // 2
         
-        # If hand is on the left side of screen, adjust roll
-        if x < center_x - 200:
-            data.roll = max(-45, data.roll - 0.5)
-        # If hand is on the right side of screen, adjust roll
-        elif x > center_x + 200:
-            data.roll = min(45, data.roll + 0.5)
-        # Otherwise gradually return to level
-        else:
-            data.roll = data.roll * 0.95
+        # Calculate hand tilt
+        hand_width = x2 - x1
+        hand_height = y2 - y1
         
-        # If hand is above center, increase pitch
-        if y < center_y - 150:
-            data.pitch = min(30, data.pitch + 0.3)
-        # If hand is below center, decrease pitch
-        elif y > center_y + 150:
-            data.pitch = max(-30, data.pitch - 0.3)
-        # Otherwise gradually return to level
-        else:
-            data.pitch = data.pitch * 0.95
+        # Calculate hand orientation for roll
+        # If hand is tilted, use that to control roll
+        hand_angle = 0
+        if hand_height != 0:
+            hand_angle = math.degrees(math.atan2(hand_width, hand_height))
+            # Map hand angle to roll (-45 to 45 degrees)
+            data.roll = max(-45, min(45, hand_angle * 2))
         
-        # If hand is in center area, consider it targeting
-        if abs(x - center_x) < 100 and abs(y - center_y) < 100:
-            if not data.target_locked and np.random.random() < 0.05:
+        # Use vertical position for pitch control
+        # Higher hand = nose up, lower hand = nose down
+        pitch_factor = (center_y - y) / (HEIGHT / 3)  # -1 to 1 range
+        data.pitch = max(-30, min(30, pitch_factor * 20))
+        
+        # Gesture recognition for special actions
+        if data.hand_gesture == "Open Palm":
+            # Increase speed with open palm
+            data.airspeed += 0.8
+            data.mach += 0.001
+            
+        elif data.hand_gesture == "Closed":
+            # Decrease speed with closed fist
+            data.airspeed -= 0.5
+            data.mach -= 0.0005
+            
+        elif data.hand_gesture == "Pointing":
+            # Target lock with pointing gesture
+            if not data.target_locked and np.random.random() < 0.1:
                 data.target_locked = True
                 data.target_distance = np.random.uniform(5, 15)
+                data.weapon_status = "LOCK"
         
-        # Update speed based on number of hands
-        if data.num_hands >= 2:
-            data.airspeed += 0.5
+        # Update G-force based on pitch change rate
+        if hasattr(data, 'prev_pitch'):
+            pitch_change = abs(data.pitch - data.prev_pitch)
+            data.g_force = min(9.0, max(0.1, 1.0 + pitch_change / 2))
+        data.prev_pitch = data.pitch
+        
+        # Random events based on hand position
+        if np.random.random() < 0.005:  # 0.5% chance per frame
+            # Random system events
+            events = [
+                "RADAR CONTACT",
+                "MISSILE ALERT",
+                "TERRAIN WARNING",
+                "FUEL LOW",
+                "SYSTEM FAULT",
+                "TARGET ACQUIRED"
+            ]
+            data.last_event = random.choice(events)
+            data.event_time = time.time()
+            
+            # Handle specific events
+            if data.last_event == "MISSILE ALERT":
+                data.missile_warning = True
+            elif data.last_event == "TARGET ACQUIRED":
+                data.target_locked = True
+                data.target_distance = np.random.uniform(5, 15)
+    else:
+        # Gradual return to level flight when no hands detected
+        data.roll *= 0.95
+        data.pitch *= 0.95
         
     return data
 
 def detect_hands(frame, model):
-    """Detect hands in frame using YOLO model"""
+    """Detect hands in frame using YOLO model with improved orientation analysis"""
     results = model(frame, classes=[0])  # Focus on people class (0) which includes hands
     
     # Create a new HUD data object
@@ -755,22 +982,53 @@ def detect_hands(frame, model):
             data.hand_confidence = confidence
             data.hand_box = (x1, y1, x2, y2)
             
-            # Determine hand gesture (simplified)
+            # Enhanced hand gesture recognition
             hand_width = x2 - x1
             hand_height = y2 - y1
             aspect_ratio = hand_width / hand_height if hand_height > 0 else 1
+            area = hand_width * hand_height
             
             if aspect_ratio > 1.5:
                 data.hand_gesture = "Open Palm"
             elif aspect_ratio < 0.6:
                 data.hand_gesture = "Pointing"
             else:
-                data.hand_gesture = "Closed"
+                if area < 5000:  # Small area likely means closed fist
+                    data.hand_gesture = "Closed"
+                else:
+                    data.hand_gesture = "Unknown"
             
-            # Draw boxes on frame
+            # Draw enhanced visualization on frame
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"{data.hand_gesture} {confidence:.2f}", (x1, y1 - 10),
+            
+            # Add orientation line to visualize hand tilt
+            cv2.line(frame, 
+                    (center_x, center_y), 
+                    (center_x + int(hand_width/2), center_y + int(hand_height/2)),
+                    (255, 0, 255), 2)
+            
+            # Add text with gesture and status
+            gesture_text = f"{data.hand_gesture} ({confidence:.2f})"
+            cv2.putText(frame, gesture_text, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            # If we have multiple hands, process them for additional control
+            if len(boxes) > 1:
+                data.dual_control = True
+                # Process second hand for additional controls
+                box2 = boxes[1]
+                x1_2, y1_2, x2_2, y2_2 = map(int, box2.xyxy[0])
+                center_x_2 = (x1_2 + x2_2) // 2
+                center_y_2 = (y1_2 + y2_2) // 2
+                
+                # Distance between hands can control throttle
+                hand_distance = math.sqrt((center_x_2 - center_x)**2 + (center_y_2 - center_y)**2)
+                # Map distance to airspeed boost
+                if hand_distance > 200:
+                    data.airspeed += 1.0  # Boost speed more with wide hand separation
+                
+                cv2.rectangle(frame, (x1_2, y1_2), (x2_2, y2_2), (0, 255, 255), 2)
+                cv2.line(frame, (center_x, center_y), (center_x_2, center_y_2), (255, 0, 0), 2)
             
     # Analyze hand movement effects on flight parameters
     data = analyze_hand_movement(data)
@@ -778,7 +1036,7 @@ def detect_hands(frame, model):
     return frame, data
 
 def draw_enhanced_hud(screen, frame_surface, data):
-    """Draw all HUD elements with enhanced visuals"""
+    """Draw all HUD elements with enhanced visuals and events"""
     # First blit the camera frame
     screen.blit(frame_surface, (0, 0))
     
@@ -788,12 +1046,39 @@ def draw_enhanced_hud(screen, frame_surface, data):
     draw_heading_indicator(screen, data.heading)
     draw_horizon(screen, data.pitch, data.roll)
     draw_flight_path_vector(screen, data.pitch, data.roll)
-    draw_status_indicators(screen, data)  # Fixed: Pass the entire data object, not just g_force
+    draw_status_indicators(screen, data)
     draw_target_info(screen, data)
     
-    # Draw hand detection visualization if hand is detected
+    # Draw tracking visualizations if enabled
     if data.hand_detected:
         draw_hand_detection_info(screen, data)
+    
+    if data.body_detected:
+        draw_body_tracking_info(screen, data)
+    
+    # Draw event notifications
+    if data.last_event and time.time() - data.event_time < 3:  # Show for 3 seconds
+        # Create flashing effect
+        if int(time.time() * 2) % 2 == 0:  # Flash at 2Hz
+            event_bg = create_transparent_surface(400, 80, alpha=200)
+            pygame.draw.rect(event_bg, RED if "ALERT" in data.last_event else YELLOW, (0, 0, 400, 80), 3)
+            
+            text = font_large.render(data.last_event, True, RED if "ALERT" in data.last_event else YELLOW)
+            event_bg.blit(text, (200 - text.get_width()//2, 25))
+            
+            screen.blit(event_bg, (WIDTH//2 - 200, 150))
+    
+    # Draw missile warning
+    if hasattr(data, 'missile_warning') and data.missile_warning:
+        if int(time.time() * 4) % 2 == 0:  # Flash at 4Hz
+            text = font_large.render("MISSILE WARNING", True, RED)
+            screen.blit(text, (WIDTH//2 - text.get_width()//2, 200))
+    
+    # Draw terrain warning if needed
+    if hasattr(data, 'terrain_warning') and data.terrain_warning:
+        if int(time.time() * 4) % 2 == 0:  # Flash at 4Hz
+            text = font_large.render("PULL UP", True, RED)
+            screen.blit(text, (WIDTH//2 - text.get_width()//2, 250))
     
     # Draw HUD frame - adds a subtle frame around the entire display
     pygame.draw.rect(screen, GREEN, (0, 0, WIDTH, HEIGHT), 1)
@@ -812,28 +1097,327 @@ def draw_enhanced_hud(screen, frame_surface, data):
     # Bottom-right
     pygame.draw.line(screen, BRIGHT_GREEN, (WIDTH-bracket_size, HEIGHT), (WIDTH, HEIGHT), 2)
     pygame.draw.line(screen, BRIGHT_GREEN, (WIDTH, HEIGHT-bracket_size), (WIDTH, HEIGHT), 2)
-
-def run_analyzer(analyzer, hud_data_ref):
-    """Run the analysis window in a separate thread"""
-    # Start Tkinter in this thread
-    analyzer.root.after(100, update_analyzer_loop, analyzer, hud_data_ref)
-    analyzer.root.mainloop()
-
-def update_analyzer_loop(analyzer, hud_data_ref):
-    """Update analyzer data periodically through Tkinter's event loop"""
-    try:
-        analyzer.update(hud_data_ref[0])
-    except Exception as e:
-        print(f"Error updating analytics window: {e}")
     
-    # Schedule next update
-    analyzer.root.after(50, update_analyzer_loop, analyzer, hud_data_ref)
+    # Draw detection mode indicator
+    if data.hand_detected:
+        text = font_medium.render("HAND CONTROL ACTIVE", True, BRIGHT_GREEN)
+        screen.blit(text, (WIDTH//2 - text.get_width()//2, HEIGHT - 100))
+        
+        if data.dual_control:
+            text = font_small.render("DUAL HAND MODE", True, BRIGHT_GREEN)
+            screen.blit(text, (WIDTH//2 - text.get_width()//2, HEIGHT - 75))
+            
+    if data.body_detected:
+        text = font_small.render("BODY TRACKING ACTIVE", True, BLUE)
+        screen.blit(text, (WIDTH//2 - text.get_width()//2, HEIGHT - 50))
+
+def draw_body_tracking_info(screen, data):
+    """Draw body tracking visualization"""
+    if not data.body_detected or not data.body_landmarks:
+        return
+    
+    # Create transparent overlay for body stats
+    body_info = create_transparent_surface(200, 100)
+    pygame.draw.rect(body_info, BLUE, (0, 0, 200, 100), 1)
+    
+    # Add body tracking status
+    text = font_small.render("Pose Tracking", True, BLUE)
+    body_info.blit(text, (10, 10))
+    
+    # Could add more body metrics here
+    # For example, estimate if pilot is looking forward
+    text = font_small.render("Pilot Status: Active", True, BLUE)
+    body_info.blit(text, (10, 40))
+    
+    # Position the info panel
+    screen.blit(body_info, (WIDTH - 220, 100))
+
+def init_mediapipe():
+    """Initialize MediaPipe pose and hands modules"""
+    # Hands setup
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=2,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    
+    # Pose setup
+    mp_pose = mp.solutions.pose
+    pose = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    
+    # Drawing utilities
+    mp_drawing = mp.solutions.drawing_utils
+    
+    return hands, pose, mp_drawing, mp_hands, mp_pose
+
+def detect_with_mediapipe(frame, hands_model, pose_model, mp_drawing, mp_hands, mp_pose):
+    """Detect hands and body pose using MediaPipe"""
+    # Create a new HUD data object
+    data = HUDData()
+    
+    # Update basic HUD values and store in history
+    data = update_hud_values(data)
+    data.altitude_history.append(data.altitude)
+    data.airspeed_history.append(data.airspeed)
+    data.pitch_history.append(data.pitch)
+    data.roll_history.append(data.roll)
+    
+    # Convert to RGB for MediaPipe
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Process with MediaPipe Hands
+    hands_results = hands_model.process(rgb_frame)
+    
+    # Process with MediaPipe Pose
+    pose_results = pose_model.process(rgb_frame)
+    
+    # Store body landmarks if detected
+    if pose_results.pose_landmarks:
+        data.body_detected = True
+        data.body_landmarks = pose_results.pose_landmarks
+        
+        # Draw body landmarks on the frame
+        mp_drawing.draw_landmarks(
+            frame, 
+            pose_results.pose_landmarks,
+            mp_pose.POSE_CONNECTIONS,
+            mp_drawing.DrawingSpec(color=(80, 110, 10), thickness=2, circle_radius=1),
+            mp_drawing.DrawingSpec(color=(80, 256, 121), thickness=2, circle_radius=1)
+        )
+    
+    # Process hand landmarks if detected
+    if hands_results.multi_hand_landmarks:
+        data.hand_detected = True
+        data.num_hands = len(hands_results.multi_hand_landmarks)
+        data.hand_landmarks = hands_results.multi_hand_landmarks
+        
+        # Process each hand
+        for idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks):
+            # Get hand classification (left/right)
+            handedness = hands_results.multi_handedness[idx].classification[0].label
+            
+            # Draw hand landmarks
+            mp_drawing.draw_landmarks(
+                frame,
+                hand_landmarks,
+                mp_hands.HAND_CONNECTIONS,
+                mp_drawing.DrawingSpec(color=(121, 22, 76), thickness=2, circle_radius=4),
+                mp_drawing.DrawingSpec(color=(250, 44, 250), thickness=2, circle_radius=2)
+            )
+            
+            # Store landmarks by hand type
+            if handedness == "Left":
+                data.left_hand_landmarks = hand_landmarks
+            else:
+                data.right_hand_landmarks = hand_landmarks
+            
+            # Calculate hand center (using wrist as reference)
+            wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+            x = int(wrist.x * frame.shape[1])
+            y = int(wrist.y * frame.shape[0])
+            
+            # Set hand position to main hand (first detected)
+            if idx == 0:
+                data.hand_position = (x, y)
+                
+                # Calculate bounding box
+                x_coords = [landmark.x for landmark in hand_landmarks.landmark]
+                y_coords = [landmark.y for landmark in hand_landmarks.landmark]
+                x1 = int(min(x_coords) * frame.shape[1])
+                y1 = int(min(y_coords) * frame.shape[0])
+                x2 = int(max(x_coords) * frame.shape[1])
+                y2 = int(max(y_coords) * frame.shape[0])
+                data.hand_box = (x1, y1, x2, y2)
+                
+                # Set confidence (MediaPipe doesn't provide confidence values like YOLO)
+                data.hand_confidence = 0.9  # Default high confidence for detected landmarks
+                
+            # Detect hand gesture based on finger positions
+            gesture = detect_hand_gesture(hand_landmarks, mp_hands)
+            
+            if handedness == "Left":
+                data.hand_gestures["left"] = gesture
+            else:
+                data.hand_gestures["right"] = gesture
+            
+            # Use the first detected hand's gesture as the main gesture
+            if idx == 0:
+                data.hand_gesture = gesture
+            
+            # Add text with gesture and handedness
+            cv2.putText(frame, f"{handedness}: {gesture}", (x-10, y-10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    
+    # If no hands detected, make sure we indicate that
+    else:
+        data.hand_detected = False
+        data.num_hands = 0
+    
+    # Analyze movement effects on flight parameters
+    data = analyze_mediapipe_movement(data)
+    
+    return frame, data
+
+def detect_hand_gesture(landmarks, mp_hands):
+    """Detect hand gesture from landmarks"""
+    # Extract key finger landmarks
+    wrist = landmarks.landmark[mp_hands.HandLandmark.WRIST]
+    thumb_tip = landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
+    index_tip = landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+    middle_tip = landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+    ring_tip = landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP]
+    pinky_tip = landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP]
+    
+    # Get MCP (knuckle) positions for reference
+    index_mcp = landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_MCP]
+    middle_mcp = landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
+    ring_mcp = landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP]
+    pinky_mcp = landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP]
+    
+    # Check if fingers are extended (above their MCP)
+    thumb_extended = thumb_tip.x < wrist.x if thumb_tip.x < wrist.x else thumb_tip.x > wrist.x
+    index_extended = index_tip.y < index_mcp.y
+    middle_extended = middle_tip.y < middle_mcp.y
+    ring_extended = ring_tip.y < ring_mcp.y
+    pinky_extended = pinky_tip.y < pinky_mcp.y
+    
+    # Define gestures based on finger positions
+    if index_extended and not middle_extended and not ring_extended and not pinky_extended:
+        return "Pointing"
+    elif all([index_extended, middle_extended, ring_extended, pinky_extended]):
+        return "Open Palm"
+    elif not any([index_extended, middle_extended, ring_extended, pinky_extended]):
+        return "Closed"
+    elif index_extended and middle_extended and not ring_extended and not pinky_extended:
+        return "Victory"
+    elif index_extended and middle_extended and ring_extended and not pinky_extended:
+        return "Three"
+    elif index_extended and pinky_extended and not middle_extended and not ring_extended:
+        return "Rock"
+    else:
+        return "Unknown"
+
+def analyze_mediapipe_movement(data):
+    """Analyze MediaPipe landmarks to control HUD parameters"""
+    if data.hand_detected:
+        x, y = data.hand_position
+        x1, y1, x2, y2 = data.hand_box
+        center_x, center_y = WIDTH // 2, HEIGHT // 2
+        
+        # Calculate hand tilt if we have landmarks
+        if data.hand_landmarks and len(data.hand_landmarks) > 0:
+            # Use the first hand for primary control
+            landmarks = data.hand_landmarks[0]
+            
+            # Calculate orientation using wrist and middle finger MCP
+            wrist_idx = 0  # MediaPipe Hands wrist index
+            middle_mcp_idx = 9  # MediaPipe Hands middle finger MCP index
+            
+            wrist = landmarks.landmark[wrist_idx]
+            middle_mcp = landmarks.landmark[middle_mcp_idx]
+            
+            # Calculate angle for roll
+            dx = middle_mcp.x - wrist.x
+            dy = middle_mcp.y - wrist.y
+            hand_angle = math.degrees(math.atan2(dy, dx))
+            
+            # Map hand rotation to roll (-45 to 45 degrees)
+            # Adjust the mapping as needed for intuitive control
+            data.roll = max(-45, min(45, hand_angle))
+            
+            # Use vertical position for pitch control
+            # Higher hand = nose up, lower hand = nose down
+            pitch_factor = (center_y - y) / (HEIGHT / 3)  # -1 to 1 range
+            data.pitch = max(-30, min(30, pitch_factor * 20))
+        
+        # Gesture-based controls
+        main_gesture = data.hand_gesture
+        
+        if main_gesture == "Open Palm":
+            # Increase speed with open palm
+            data.airspeed += 0.8
+            data.mach += 0.001
+            
+        elif main_gesture == "Closed":
+            # Decrease speed with closed fist
+            data.airspeed -= 0.5
+            data.mach -= 0.0005
+            
+        elif main_gesture == "Pointing":
+            # Target lock with pointing gesture
+            if not data.target_locked and np.random.random() < 0.1:
+                data.target_locked = True
+                data.target_distance = np.random.uniform(5, 15)
+                data.weapon_status = "LOCK"
+                
+        elif main_gesture == "Victory":
+            # Toggle special mode or weapon status
+            if np.random.random() < 0.05:  # Occasionally change weapon status
+                data.weapon_status = random.choice(["ARMED", "READY", "STANDBY"])
+        
+        # Dual hand controls if both hands detected
+        if data.num_hands > 1:
+            data.dual_control = True
+            # Two-handed gesture combinations could be added here
+        
+        # Update G-force based on pitch change rate
+        if hasattr(data, 'prev_pitch'):
+            pitch_change = abs(data.pitch - data.prev_pitch)
+            data.g_force = min(9.0, max(0.1, 1.0 + pitch_change / 2))
+        data.prev_pitch = data.pitch
+        
+        # Random events based on hand position
+        if np.random.random() < 0.005:  # 0.5% chance per frame
+            # Random system events
+            events = [
+                "RADAR CONTACT",
+                "MISSILE ALERT",
+                "TERRAIN WARNING",
+                "FUEL LOW",
+                "SYSTEM FAULT",
+                "TARGET ACQUIRED"
+            ]
+            data.last_event = random.choice(events)
+            data.event_time = time.time()
+            
+            # Handle specific events
+            if data.last_event == "MISSILE ALERT":
+                data.missile_warning = True
+            elif data.last_event == "TARGET ACQUIRED":
+                data.target_locked = True
+                data.target_distance = np.random.uniform(5, 15)
+            elif data.last_event == "TERRAIN WARNING":
+                data.terrain_warning = True
+                
+    else:
+        # Gradual return to level flight when no hands detected
+        data.roll *= 0.95
+        data.pitch *= 0.95
+        
+        # Clear warnings over time
+        if hasattr(data, 'missile_warning') and data.missile_warning and np.random.random() < 0.01:
+            data.missile_warning = False
+        if hasattr(data, 'terrain_warning') and data.terrain_warning and np.random.random() < 0.01:
+            data.terrain_warning = False
+        
+    return data
 
 def main():
     """Main function to run the camera-based HUD with hand detection"""
-    # Load YOLO model for hand detection
+    # Load YOLO model for hand detection as backup
     print("Loading YOLO model for hand detection...")
-    model = YOLO("yolov8n.pt")  # Use yolov8 nano model
+    yolo_model = YOLO("yolov8n.pt")  # Use yolov8 nano model
+    
+    # Initialize MediaPipe
+    print("Initializing MediaPipe...")
+    hands, pose, mp_drawing, mp_hands, mp_pose = init_mediapipe()
     
     # Initialize camera
     print("Initializing camera...")
@@ -848,7 +1432,7 @@ def main():
     # Create pygame display
     os.environ['SDL_VIDEO_CENTERED'] = '1'  # Center window
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Fighter Jet HUD with Hand Detection")
+    pygame.display.set_caption("Fighter Jet HUD with MediaPipe Tracking")
     
     # Initialize HUD data and analyzer
     hud_data = HUDData()
@@ -866,7 +1450,10 @@ def main():
     prev_frame_time = 0
     new_frame_time = 0
     
-    print("HUD system ready. Press ESC to exit.")
+    # Detection mode (0=MediaPipe, 1=YOLO)
+    detection_mode = 0
+    
+    print("HUD system ready. Press ESC to exit, M to switch detection mode.")
     
     while running:
         # Process pygame events
@@ -880,6 +1467,11 @@ def main():
                 # Add special key for toggling target lock manually
                 elif event.key == pygame.K_t:
                     hud_data_ref[0].target_locked = not hud_data_ref[0].target_locked
+                # Toggle between detection modes
+                elif event.key == pygame.K_m:
+                    detection_mode = 1 - detection_mode
+                    mode_name = "YOLO" if detection_mode == 1 else "MediaPipe"
+                    print(f"Switched to {mode_name} detection mode")
                 # Add manual controls for testing
                 elif event.key == pygame.K_UP:
                     hud_data_ref[0].pitch += 2
@@ -909,8 +1501,20 @@ def main():
         cv2.putText(frame, f"FPS: {fps}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
                     1, (100, 255, 0), 2, cv2.LINE_AA)
         
-        # Run hand detection on frame
-        frame, hud_data = detect_hands(frame, model)
+        # Show active detection mode
+        mode_name = "MediaPipe" if detection_mode == 0 else "YOLO"
+        cv2.putText(frame, f"Mode: {mode_name}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 
+                    1, (100, 255, 0), 2, cv2.LINE_AA)
+        
+        # Run hand detection based on selected mode
+        if detection_mode == 0:
+            # Use MediaPipe
+            frame, hud_data = detect_with_mediapipe(frame, hands, pose, mp_drawing, mp_hands, mp_pose)
+            hud_data.detection_mode = 0
+        else:
+            # Use YOLO
+            frame, hud_data = detect_hands(frame, yolo_model)
+            hud_data.detection_mode = 1
         
         # Update the shared data
         hud_data_ref[0] = hud_data
@@ -928,8 +1532,21 @@ def main():
     
     # Clean up
     cap.release()
+    hands.close()
+    pose.close()
     pygame.quit()
     print("HUD system terminated.")
+
+def run_analyzer(analyzer, hud_data_ref):
+    """Run the analyzer in a separate thread"""
+    try:
+        while True:
+            # Update the analyzer with the latest HUD data
+            if hud_data_ref and len(hud_data_ref) > 0:
+                analyzer.update(hud_data_ref[0])
+            time.sleep(0.1)  # Update at 10Hz to avoid overloading
+    except Exception as e:
+        print(f"Error in analyzer thread: {e}")
 
 if __name__ == "__main__":
     main()

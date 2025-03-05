@@ -1,0 +1,2 @@
+timestamp,hand_detected,num_hands,hand_position_x,hand_position_y,hand_gesture,hand_confidence,altitude,airspeed,heading,pitch,roll,g_force,target_locked,weapon_status,fuel,mach,aoa,terrain_warning,missile_warning,detection_mode
+2025-03-04 22:02:04.972184,TEST,TEST,0,0,TEST,0.0,0,0,0,0,0,0,False,TEST,0,0.0,0.0,False,False,TEST
