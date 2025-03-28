@@ -1,0 +1,40 @@
+# Core data processing
+numpy==1.24.3
+pandas==2.0.1
+scipy==1.10.1
+
+# Visualization
+matplotlib==3.7.1
+seaborn==0.12.2
+plotly==5.14.1
+
+# Dashboard and UI (for HUD display)
+PyQt5==5.15.9
+pyqtgraph==0.13.3
+
+# Time series analysis
+statsmodels==0.14.0
+
+# Utilities
+tqdm==4.65.0
+pyyaml==6.0
+
+# LLM and Vision processing
+langchain==0.0.271
+langchain_ollama==0.0.3
+pillow==10.0.0
+
+# GUI
+tk==0.1.0  # For tkinter file dialogs
+
+# Computer Vision
+opencv-python==4.8.0.74
+mediapipe==0.10.3
+ultralytics==8.0.145  # For YOLO v8
+
+# Additional UI requirements
+pygame==2.5.0
+colorama==0.4.6
+
+# For logging and data collection
+python-dateutil==2.8.2
