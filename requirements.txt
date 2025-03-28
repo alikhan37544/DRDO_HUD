@@ -29,7 +29,7 @@ tk==0.1.0  # For tkinter file dialogs
 
 # Computer Vision
 opencv-python==4.8.0.74
-mediapipe==0.10.3
+mediapipe==0.10.5
 ultralytics==8.0.145  # For YOLO v8
 
 # Additional UI requirements
