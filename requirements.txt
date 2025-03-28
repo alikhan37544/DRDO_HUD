@@ -20,7 +20,7 @@ tqdm==4.65.0
 pyyaml==6.0
 
 # LLM and Vision processing
-langchain==0.0.271
+langchain
 langchain_ollama
 pillow==10.0.0
 
