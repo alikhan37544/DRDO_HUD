@@ -21,7 +21,7 @@ pyyaml==6.0
 
 # LLM and Vision processing
 langchain==0.0.271
-langchain_ollama==0.0.3
+langchain_ollama
 pillow==10.0.0
 
 # GUI
